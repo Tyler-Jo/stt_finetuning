@@ -1,0 +1,3 @@
+- whisper-tiny-local directory 에 모델 설치 필요
+- finetuning parameter 은 조절해야함
+- train data는 별도 다운로드 ㄱㄱ

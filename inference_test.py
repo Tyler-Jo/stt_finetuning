@@ -13,7 +13,7 @@ from transformers import (
 MODEL_PATH = "./whisper-tiny-finetuned"
 
 # 2. 장치 설정
-device = 0 if torch.cuda.is_available() else -1
+device = "mps" if torch.backends.mps.is_available() else "cpu"
 print(f"🚀 모델 로드 중... (장치: {'GPU' if device == 0 else 'CPU'})")
 
 # 3. 모델 및 프로세서 개별 로드 (중복 에러 방지)

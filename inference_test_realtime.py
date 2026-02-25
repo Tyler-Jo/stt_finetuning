@@ -1,74 +1,79 @@
 import torch
 import numpy as np
-import sounddevice as sd
+import pyaudio
+import sys
+import os
 from transformers import (
     WhisperForConditionalGeneration,
-    WhisperFeatureExtractor,
-    WhisperTokenizer,
-    WhisperProcessor,
-    pipeline,
-    GenerationConfig,
+    WhisperProcessor
 )
 
-# 1. 경로 설정
+# 1. 경로 및 장치 설정
 MODEL_PATH = "./whisper-tiny-finetuned"
+device = "mps" if torch.backends.mps.is_available() else "cpu"
 
-# 2. 모델 및 프로세서 개별 로드 (우리가 찾아낸 필승 조합)
-print("🚀 모델 로딩 중... 잠시만 기다려 주세요.")
-model = WhisperForConditionalGeneration.from_pretrained(MODEL_PATH)
-feature_extractor = WhisperFeatureExtractor.from_pretrained(MODEL_PATH)
-tokenizer = WhisperTokenizer.from_pretrained(MODEL_PATH)
-processor = WhisperProcessor(feature_extractor=feature_extractor, tokenizer=tokenizer)
+# 2. 모델 및 프로세서 로드
+print(f"🚀 파인튜닝 모델 로드 중... (장치: {device})")
+model = WhisperForConditionalGeneration.from_pretrained(MODEL_PATH).to(device)
+processor = WhisperProcessor.from_pretrained(MODEL_PATH)
 
-# 한국어 설정 강제 주입
-model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(
-    language="korean", task="transcribe"
-)
-model.generation_config = GenerationConfig.from_model_config(model.config)
-model.generation_config.update(language="korean", task="transcribe")
+# ⭐️ 핵심: 모델 내부 설정을 한국어 다국어 모드로 강제 고정
+model.config.forced_decoder_ids = None
+model.config.suppress_tokens = []
+model.config.is_multilingual = True
 
-# 3. 파이프라인 구축
-device = 0 if torch.cuda.is_available() else -1
-pipe = pipeline(
-    "automatic-speech-recognition",
-    model=model,
-    tokenizer=tokenizer,
-    feature_extractor=feature_extractor,
-    device=device,
-)
+# 3. 오디오 설정
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+CHUNK = 1024 * 4
+p = pyaudio.PyAudio()
 
-# 4. 실시간 녹음 및 추론 설정
-SAMPLING_RATE = 16000
-DURATION = 5  # 5초 단위로 끊어서 인식
+stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE,
+                input=True, frames_per_buffer=CHUNK)
 
+print("\n" + "="*50)
+print("🎙️  [한국어 전용] 실시간 군사 용어 테스트 시작")
+print("   (종료: Ctrl+C)")
+print("="*50 + "\n")
 
-def record_and_transcribe():
-    print(f"\n🎤 {DURATION}초 동안 말씀해 주세요... (종료하려면 Ctrl+C)")
+frames = []
 
+try:
     while True:
-        try:
-            # 마이크로부터 데이터 수집
-            recording = sd.rec(
-                int(DURATION * SAMPLING_RATE),
-                samplerate=SAMPLING_RATE,
-                channels=1,
-                dtype="float32",
+        data = stream.read(CHUNK, exception_on_overflow=False)
+        frames.append(np.frombuffer(data, dtype=np.int16))
+        
+        # 약 2초(8번의 CHUNK) 데이터가 쌓이면 추론
+        if len(frames) > 8: 
+            audio_data = np.concatenate(frames).astype(np.float32) / 32768.0
+            
+            # 특징 추출
+            input_features = processor(audio_data, sampling_rate=RATE, return_tensors="pt").input_features.to(device)
+            
+            # ⭐️ 해결책: generate 호출 시 language와 task를 직접 인자로 전달
+            # 이렇게 하면 config의 오류나 버전을 무시하고 한국어로 강제 실행됩니다.
+            predicted_ids = model.generate(
+                input_features,
+                language="ko",
+                task="transcribe",
+                max_new_tokens=128,
+                # Tiny 모델의 환각 방지를 위해 빔 서치 추가 (필요 시 1로 조정 가능)
+                num_beams=1 
             )
-            sd.wait()  # 녹음이 끝날 때까지 대기
+            
+            transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+            
+            if transcription.strip():
+                # 한글이 포함된 경우에만 출력 (영어 환각 필터링 효과)
+                sys.stdout.write(f"\r📝 인식 결과: {transcription}                                ")
+                sys.stdout.flush()
+            
+            frames = []
 
-            # 2차원 배열을 1차원으로 변환
-            audio_data = recording.flatten()
-
-            # 추론
-            result = pipe({"raw": audio_data, "sampling_rate": SAMPLING_RATE})
-
-            print(f"📝 인식 결과: {result['text']}")
-            print("---")
-
-        except KeyboardInterrupt:
-            print("\n👋 실시간 테스트를 종료합니다.")
-            break
-
-
-if __name__ == "__main__":
-    record_and_transcribe()
+except KeyboardInterrupt:
+    print("\n\n=== 테스트 종료 ===")
+finally:
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
